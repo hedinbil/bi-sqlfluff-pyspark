@@ -134,9 +134,9 @@ df = spark.sql(f"""
         )
 
         modified_content = python_file.read_text()
-        # Date format specifier must be preserved
-        assert "{current_date:%Y-%m-%d}" in modified_content or "{current_date:" in modified_content, (
-            f"Date format specifier must be preserved. Got: {modified_content}"
+        # Date format specifier must be preserved exactly
+        assert "{current_date:%Y-%m-%d}" in modified_content, (
+            f"Date format specifier '{{current_date:%Y-%m-%d}}' must be preserved exactly. Got: {modified_content}"
         )
 
 
