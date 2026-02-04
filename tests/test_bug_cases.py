@@ -79,9 +79,14 @@ df = spark.sql(f"""
         )
 
         modified_content = python_file.read_text()
-        # Expression must be preserved (at least the key parts)
-        assert "datetime.now()" in modified_content or "{datetime.now()" in modified_content, (
-            f"F-string expression must be preserved. Got: {modified_content}"
+        # Expression must be preserved - check for the full expression pattern
+        # The expression should be in the f-string with braces
+        assert "{datetime.now()" in modified_content, (
+            f"F-string expression '{{datetime.now()' must be preserved. Got: {modified_content}"
+        )
+        # Also verify strftime is preserved as part of the expression
+        assert "strftime" in modified_content, (
+            f"F-string expression part 'strftime' must be preserved. Got: {modified_content}"
         )
 
 
