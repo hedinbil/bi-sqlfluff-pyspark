@@ -375,9 +375,12 @@ class TestCase09SQLWithJinjaTemplates:
         )
 
         modified_content = python_file.read_text()
-        # Jinja syntax should be preserved
+        # Jinja syntax should be preserved - check for both variables
         assert "{{ company_name }}" in modified_content or "{{company_name}}" in modified_content, (
-            f"Jinja template syntax must be preserved. Got: {modified_content}"
+            f"Jinja variable '{{{{ company_name }}}}' must be preserved. Got: {modified_content}"
+        )
+        assert "{{ start_date }}" in modified_content or "{{start_date}}" in modified_content, (
+            f"Jinja variable '{{{{ start_date }}}}' must be preserved. Got: {modified_content}"
         )
 
     def test_jinja_conditionals_preserved(self, sqlfluff_config_file, tmp_path):
@@ -397,9 +400,12 @@ class TestCase09SQLWithJinjaTemplates:
         )
 
         modified_content = python_file.read_text()
-        # Jinja conditionals should be preserved
+        # Jinja conditionals should be preserved - check for both opening and closing tags
         assert "{% if" in modified_content or "{%if" in modified_content, (
-            f"Jinja conditionals must be preserved. Got: {modified_content}"
+            f"Jinja opening tag '{{% if' must be preserved. Got: {modified_content}"
+        )
+        assert "{% endif %}" in modified_content or "{%endif%}" in modified_content, (
+            f"Jinja closing tag '{{% endif %}}' must be preserved. Got: {modified_content}"
         )
 
 
