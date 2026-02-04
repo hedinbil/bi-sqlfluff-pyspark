@@ -42,3 +42,8 @@ markers = [
     "unit: Unit tests",
     "integration: Integration tests",
 ]
+
+[tool.ruff.lint]
+# Ignore undefined names in test fixtures (they're intentionally incomplete code snippets)
+[tool.ruff.lint.per-file-ignores]
+"tests/fixtures/**/*.py" = ["F821"]

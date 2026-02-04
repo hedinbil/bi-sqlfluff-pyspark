@@ -7,6 +7,7 @@ and replace them in the original source.
 import ast
 import io
 import logging
+import re
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Union
 from sqlfluff_pyspark.core import fix_sql
@@ -165,7 +166,9 @@ def extract_sql_strings(source_code: str) -> List[Dict[str, any]]:
         return []
 
 
-def _extract_expression_source(source_code: str, expr_node: ast.AST) -> str:
+def _extract_expression_source(
+    source_code: str, expr_node: ast.AST, formatted_value: ast.FormattedValue = None
+) -> str:
     """Extract the source code for an expression node from the original source.
 
     For f-strings like f"SELECT * FROM {table_name}", this extracts "table_name"
@@ -174,8 +177,65 @@ def _extract_expression_source(source_code: str, expr_node: ast.AST) -> str:
     Args:
         source_code: Original source code
         expr_node: The AST expression node (e.g., Name, Attribute, etc.)
+        formatted_value: Optional FormattedValue node to help locate braces in source
     """
-    # Get the line and column info for the expression
+    # Try using ast.get_source_segment if available (Python 3.8+)
+    try:
+        if hasattr(ast, "get_source_segment"):
+            # Use the FormattedValue position to find braces, or expr_node if no FormattedValue
+            node_to_use = formatted_value if formatted_value is not None else expr_node
+            segment = ast.get_source_segment(source_code, node_to_use)
+            if segment:
+                # If we got the segment from FormattedValue, it might include braces
+                # Remove braces if present
+                segment = segment.strip()
+                if segment.startswith("{") and segment.endswith("}"):
+                    segment = segment[1:-1]
+                return segment
+    except (AttributeError, TypeError):
+        pass
+
+    # Fallback: Use FormattedValue position to find braces in source
+    if formatted_value is not None:
+        lines = source_code.splitlines(keepends=True)
+        lineno = formatted_value.lineno - 1  # Convert to 0-based
+        end_lineno = getattr(formatted_value, "end_lineno", formatted_value.lineno) - 1
+
+        if lineno < len(lines):
+            # Find the opening brace before the expression
+            line = lines[lineno]
+            start_col = formatted_value.col_offset
+
+            # Look backwards for opening brace
+            brace_start = start_col
+            while brace_start > 0 and line[brace_start - 1] != "{":
+                brace_start -= 1
+
+            # Find the closing brace after the expression
+            if end_lineno < len(lines):
+                end_line = lines[end_lineno]
+                end_col = getattr(formatted_value, "col_end_offset", start_col)
+
+                # Look forwards for closing brace
+                brace_end = end_col
+                while brace_end < len(end_line) and end_line[brace_end] != "}":
+                    brace_end += 1
+
+                # Extract content between braces
+                if brace_start < start_col and brace_end <= len(end_line):
+                    if lineno == end_lineno:
+                        return line[brace_start + 1 : brace_end].strip()
+                    else:
+                        # Multi-line: combine lines
+                        result = line[brace_start + 1 :]
+                        for i in range(lineno + 1, end_lineno):
+                            if i < len(lines):
+                                result += lines[i]
+                        if end_lineno < len(lines):
+                            result += end_line[:brace_end]
+                        return result.strip()
+
+    # Final fallback: Use expr_node position directly
     lineno = expr_node.lineno - 1  # Convert to 0-based
     end_lineno = getattr(expr_node, "end_lineno", expr_node.lineno) - 1
 
@@ -240,8 +300,11 @@ def _format_fstring_sql(
         if part["type"] == "str":
             sql_with_placeholders.append(part["value"])
         elif part["type"] == "expr":
-            # Extract expression source from the expression node (not the FormattedValue)
-            expr_source = _extract_expression_source(source_code, part["expr_node"])
+            # Extract expression source from the expression node, using FormattedValue for position
+            formatted_value = part.get("formatted_value")
+            expr_source = _extract_expression_source(
+                source_code, part["expr_node"], formatted_value
+            )
             expressions.append(expr_source)
             # Create a unique placeholder that won't appear in SQL
             placeholder = f"{FSTRING_PLACEHOLDER}{i:04d}{FSTRING_PLACEHOLDER}"
@@ -262,9 +325,13 @@ def _format_fstring_sql(
 
     # Replace placeholders back with expressions
     # Process in reverse order to avoid issues with overlapping patterns
+    # Note: sqlfluff may change the case of the placeholder, so we need to do
+    # case-insensitive replacement
     result = formatted_sql
     for placeholder, expr_source in reversed(placeholder_patterns):
-        result = result.replace(placeholder, f"{{{expr_source}}}")
+        # Use regex for case-insensitive replacement since sqlfluff may lowercase placeholders
+        pattern = re.escape(placeholder)
+        result = re.sub(pattern, f"{{{expr_source}}}", result, flags=re.IGNORECASE)
 
     # Determine if we should use triple quotes
     use_triple_quotes = "\n" in result or len(result) > 80

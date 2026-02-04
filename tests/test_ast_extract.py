@@ -1,6 +1,7 @@
 """Tests for AST-based SQL extraction and replacement."""
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -393,15 +394,27 @@ def get_data():
         original_code = 'def get_data():\n    table = "users"\n    result = spark.sql(f"SELECT * FROM {table} WHERE id = {user_id}")\n    return result\n'
         python_file.write_text(original_code)
 
-        result = reformat_sql_in_python_file(
+        reformat_sql_in_python_file(
             str(python_file), sqlfluff_config_file, dry_run=False
         )
 
-        if result["sql_strings_reformatted"] > 0:
-            modified_content = python_file.read_text()
-            # Check that expressions are still present
-            assert "{table}" in modified_content or "table" in modified_content
-            assert "{user_id}" in modified_content or "user_id" in modified_content
+        modified_content = python_file.read_text()
+        # Check that exact f-string placeholder syntax is preserved
+        assert "{table}" in modified_content, (
+            f"Expected f-string placeholder '{{table}}' not found in output. "
+            f"Content: {modified_content}"
+        )
+        assert "{user_id}" in modified_content, (
+            f"Expected f-string placeholder '{{user_id}}' not found in output. "
+            f"Content: {modified_content}"
+        )
+        # Verify it's still an f-string (has 'f' prefix)
+        assert (
+            'f"' in modified_content
+            or "f'" in modified_content
+            or 'f"""' in modified_content
+            or "f'''" in modified_content
+        ), f"Expected f-string prefix 'f' not found. Content: {modified_content}"
 
     def test_fstring_with_multiline_sql(self, sqlfluff_config_file, tmp_path):
         """Test f-string with multiline SQL."""
@@ -706,3 +719,194 @@ def get_data():
             assert any(
                 expr in modified_content for expr in expected.FSTRING_EXPRESSIONS
             ), f"None of the f-string expressions found: {expected.FSTRING_EXPRESSIONS}"
+
+    def test_fstring_placeholder_preservation_simple(
+        self, sqlfluff_config_file, tmp_path
+    ):
+        """Test that simple f-string placeholders are preserved exactly."""
+        python_file = tmp_path / "test.py"
+        original_code = 'def get_data():\n    table = "users"\n    result = spark.sql(f"SELECT * FROM {table}")\n    return result\n'
+        python_file.write_text(original_code)
+
+        reformat_sql_in_python_file(
+            str(python_file), sqlfluff_config_file, dry_run=False
+        )
+
+        modified_content = python_file.read_text()
+        # Must have exact placeholder syntax with braces
+        assert "{table}" in modified_content, (
+            f"F-string placeholder '{{table}}' must be preserved. "
+            f"Got: {modified_content}"
+        )
+        # Must still be an f-string
+        assert (
+            'spark.sql(f"' in modified_content or "spark.sql(f'" in modified_content
+        ), f"Must preserve f-string prefix. Got: {modified_content}"
+
+    def test_fstring_placeholder_preservation_multiple(
+        self, sqlfluff_config_file, tmp_path
+    ):
+        """Test that multiple f-string placeholders are all preserved."""
+        python_file = tmp_path / "test.py"
+        original_code = 'def get_data():\n    table = "users"\n    col = "id"\n    val = 123\n    result = spark.sql(f"SELECT {col} FROM {table} WHERE {col} = {val}")\n    return result\n'
+        python_file.write_text(original_code)
+
+        reformat_sql_in_python_file(
+            str(python_file), sqlfluff_config_file, dry_run=False
+        )
+
+        modified_content = python_file.read_text()
+        # All placeholders must be preserved
+        assert "{col}" in modified_content, (
+            f"F-string placeholder '{{col}}' must be preserved. Got: {modified_content}"
+        )
+        assert "{table}" in modified_content, (
+            f"F-string placeholder '{{table}}' must be preserved. Got: {modified_content}"
+        )
+        assert "{val}" in modified_content, (
+            f"F-string placeholder '{{val}}' must be preserved. Got: {modified_content}"
+        )
+        # Count occurrences - each placeholder should appear at least once
+        assert modified_content.count("{col}") >= 1, (
+            f"Placeholder '{{col}}' should appear at least once. Got: {modified_content}"
+        )
+
+    def test_fstring_placeholder_preservation_with_attribute(
+        self, sqlfluff_config_file, tmp_path
+    ):
+        """Test that f-string placeholders with attribute access are preserved."""
+        python_file = tmp_path / "test.py"
+        original_code = 'def get_data():\n    config = type("Config", (), {"table": "users"})()\n    result = spark.sql(f"SELECT * FROM {config.table}")\n    return result\n'
+        python_file.write_text(original_code)
+
+        reformat_sql_in_python_file(
+            str(python_file), sqlfluff_config_file, dry_run=False
+        )
+
+        modified_content = python_file.read_text()
+        # Attribute access placeholder must be preserved
+        assert "{config.table}" in modified_content, (
+            f"F-string placeholder with attribute access '{{config.table}}' must be preserved. "
+            f"Got: {modified_content}"
+        )
+
+    def test_fstring_placeholder_preservation_multiline(
+        self, sqlfluff_config_file, tmp_path
+    ):
+        """Test that f-string placeholders are preserved in multiline SQL."""
+        python_file = tmp_path / "test.py"
+        original_code = '''def get_data():
+    table = "users"
+    result = spark.sql(f"""
+    SELECT id, name
+    FROM {table}
+    WHERE active = 1
+    """)
+    return result
+'''
+        python_file.write_text(original_code)
+
+        reformat_sql_in_python_file(
+            str(python_file), sqlfluff_config_file, dry_run=False
+        )
+
+        modified_content = python_file.read_text()
+        # Placeholder must be preserved in multiline f-string
+        assert "{table}" in modified_content, (
+            f"F-string placeholder '{{table}}' must be preserved in multiline SQL. "
+            f"Got: {modified_content}"
+        )
+        # Must still be an f-string with triple quotes
+        assert 'f"""' in modified_content or "f'''" in modified_content, (
+            f"Multiline f-string prefix must be preserved. Got: {modified_content}"
+        )
+
+    def test_fstring_placeholder_preservation_after_formatting(
+        self, sqlfluff_config_file, tmp_path
+    ):
+        """Test that placeholders are preserved even when SQL formatting changes."""
+        python_file = tmp_path / "test.py"
+        # Use SQL that will definitely be reformatted (bad case, spacing)
+        original_code = 'def get_data():\n    table = "users"\n    result = spark.sql(f"SeLEct * fRom {table} wHeRe id=1")\n    return result\n'
+        python_file.write_text(original_code)
+
+        reformat_sql_in_python_file(
+            str(python_file), sqlfluff_config_file, dry_run=False
+        )
+
+        modified_content = python_file.read_text()
+        # Placeholder must be preserved even after SQL is reformatted
+        assert "{table}" in modified_content, (
+            f"F-string placeholder '{{table}}' must be preserved after SQL formatting. "
+            f"Got: {modified_content}"
+        )
+        # SQL should be reformatted (case fixed)
+        assert (
+            "SELECT" in modified_content.upper() or "FROM" in modified_content.upper()
+        ), f"SQL should be reformatted. Got: {modified_content}"
+        # But placeholder should remain unchanged
+        placeholder_pos = modified_content.find("{table}")
+        assert placeholder_pos != -1, "Placeholder should exist"
+        # Extract the SQL part to verify placeholder is in correct position
+        # Handle both single and triple quotes
+        sql_start = modified_content.find('f"')
+        if sql_start == -1:
+            sql_start = modified_content.find('f"""')
+        if sql_start != -1:
+            # Check if it's triple quotes
+            if modified_content[sql_start : sql_start + 4] == 'f"""':
+                sql_end = modified_content.find('"""', sql_start + 4)
+                if sql_end != -1:
+                    sql_part = modified_content[sql_start : sql_end + 3]
+                else:
+                    sql_part = None
+            else:
+                sql_end = modified_content.find('"', sql_start + 2)
+                if sql_end != -1:
+                    sql_part = modified_content[sql_start : sql_end + 1]
+                else:
+                    sql_part = None
+            if sql_part:
+                assert "{table}" in sql_part, (
+                    f"Placeholder should be within the SQL string. SQL part: {sql_part}"
+                )
+
+    def test_fstring_placeholder_at_start_of_sql(self, sqlfluff_config_file, tmp_path):
+        """Test that f-string placeholder at the start of SQL is preserved."""
+        python_file = tmp_path / "test.py"
+        original_code = 'def get_data():\n    table = "users"\n    result = spark.sql(f"{table}.id, name FROM users")\n    return result\n'
+        python_file.write_text(original_code)
+
+        reformat_sql_in_python_file(
+            str(python_file), sqlfluff_config_file, dry_run=False
+        )
+
+        modified_content = python_file.read_text()
+        # Placeholder at start must be preserved
+        assert "{table}" in modified_content, (
+            f"F-string placeholder '{{table}}' at start of SQL must be preserved. "
+            f"Got: {modified_content}"
+        )
+
+    def test_fstring_placeholder_at_end_of_sql(self, sqlfluff_config_file, tmp_path):
+        """Test that f-string placeholder at the end of SQL is preserved."""
+        python_file = tmp_path / "test.py"
+        original_code = 'def get_data():\n    table = "users"\n    result = spark.sql(f"SELECT * FROM {table}")\n    return result\n'
+        python_file.write_text(original_code)
+
+        reformat_sql_in_python_file(
+            str(python_file), sqlfluff_config_file, dry_run=False
+        )
+
+        modified_content = python_file.read_text()
+        # Placeholder at end must be preserved
+        assert "{table}" in modified_content, (
+            f"F-string placeholder '{{table}}' at end of SQL must be preserved. "
+            f"Got: {modified_content}"
+        )
+        # Verify the placeholder is actually in the SQL part, not elsewhere
+        sql_match = re.search(r'f["\']([^"\']*\{table\}[^"\']*)["\']', modified_content)
+        assert sql_match is not None, (
+            f"Placeholder '{{table}}' should be within the SQL f-string. "
+            f"Got: {modified_content}"
+        )
