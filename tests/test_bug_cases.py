@@ -11,25 +11,55 @@ class TestCase01FStringInterpolationBroken:
         self, sqlfluff_config_file, tmp_path
     ):
         """Test that f-string variable placeholders are preserved."""
+        # Test against the actual documented bug case
+        from pathlib import Path
+        bug_case_dir = Path(__file__).parent.parent / "sql_pyspark_fixer_test_cases" / "test_case_01_fstring_interpolation_broken"
+        before_file = bug_case_dir / "before.py"
+        after_file = bug_case_dir / "after.py"
+        
+        if not before_file.exists():
+            pytest.skip("Bug case files not found")
+        
+        # Read the before (correct) and after (broken) versions
+        before_content = before_file.read_text()
+        after_content = after_file.read_text()
+        
+        # Create temp file with before content
         python_file = tmp_path / "test.py"
-        # Minimal case: single variable interpolation
-        original_code = '''company_code = "HPL"
-df = spark.sql(f"""
-    SELECT * FROM table WHERE code = '{company_code}'
-""")
-'''
-        python_file.write_text(original_code)
+        python_file.write_text(before_content)
 
         result = reformat_sql_in_python_file(
             str(python_file), sqlfluff_config_file, dry_run=False
         )
 
         modified_content = python_file.read_text()
-        # CRITICAL: The placeholder must be preserved
+        
+        # CRITICAL: The output must NOT match the broken version (after.py)
+        assert modified_content != after_content, (
+            f"Output matches broken version! The fixer is still producing broken output. "
+            f"This means the bug is NOT fixed."
+        )
+        
+        # CRITICAL: The placeholder must be preserved (check for the specific variable from the bug case)
+        assert "{V_COMPANY_CODE_HEDIN_PARTS_AND_LOGISTICS_AB}" in modified_content, (
+            f"F-string placeholder '{{V_COMPANY_CODE_HEDIN_PARTS_AND_LOGISTICS_AB}}' must be preserved. "
+            f"Got: {modified_content}"
+        )
         assert "{company_code}" in modified_content, (
             f"F-string placeholder '{{company_code}}' must be preserved. "
             f"Got: {modified_content}"
         )
+        assert "{department}" in modified_content, (
+            f"F-string placeholder '{{department}}' must be preserved. "
+            f"Got: {modified_content}"
+        )
+        
+        # Must NOT have empty placeholders (the bug symptom)
+        assert modified_content.count("'{}'") == 0, (
+            f"Found empty placeholders '{{}}' in output - this is the bug! "
+            f"Got: {modified_content}"
+        )
+        
         # Must still be an f-string
         assert 'f"""' in modified_content or "f'''" in modified_content, (
             f"Must preserve f-string prefix. Got: {modified_content}"
